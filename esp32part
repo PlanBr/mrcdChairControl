@@ -1,0 +1,238 @@
+from machine import Pin, I2C
+from machine import Timer
+from time import sleep_ms
+import ubluetooth
+
+
+# key2 connection (4 legs used)
+# port4-> leg 1
+# port2-> leg 2
+# port32-> leg 3
+# port33-> leg 4
+# key1 connection (7 legs used)
+# port21-> leg 1
+# port22-> leg 2
+# port23-> leg 3
+# port13-> leg 4
+# port12-> leg 5
+# port14-> leg 6
+# port27-> leg 7
+# solidStateReley
+# port18-> out1
+# port19->out2??
+# port15->out3??
+class Logger:
+    def log(self, msg):
+        print(msg)
+
+
+class PinOut():
+    def __init__(self,pins):
+        self.pins=pins
+    def stopAll(self):
+        for pin in self.pins:
+            Pin(pin, Pin.OUT).value(0)
+
+    def printPinsState(self):
+        pinState = "Pins state: "
+        for pin in self.pins:
+            pinState += str(pin) + "-" + str(Pin(pin).value()) + ";"
+        print(pinState)
+        return pinState
+
+    def blink(self, num):
+        out = Pin(int(num), Pin.OUT)
+        out.value(1)
+        sleep_ms(600)
+        out.value(0)
+        print('blink 600ms with ', num)
+
+    def switchOut(self, num):
+        out = Pin(int(num), Pin.OUT)
+        out.value(not out.value())
+
+
+class MrcdChair(PinOut):
+    def __init__(self, pins):
+        self.pins = pins
+
+    def _move(self, pins, time):
+        if time < 500 or time > 3000: time = 1000
+        for pin in pins:
+            Pin(pin, Pin.OUT).value(1)
+        sleep_ms(time)
+        for pin in pins:
+            Pin(pin, Pin.OUT).value(0)
+
+    def fwd(self, direction, time):
+        # 12+32/33 whole chair fwd/bwd
+        if direction == -1:
+            self._move([12, 32], time)
+        elif direction == 1:
+            self._move([12, 33], time)
+        else:
+            print("incorrect parameters for fwd")
+
+    def incline(self, direction, time):
+        if direction == 1:
+            self._move([22, 4], time)
+        elif direction == -1:
+            self._move([22, 32], time)
+        else:
+            print("incorrect parameters for incline")
+
+    def chrRot(self, direction, time):
+        if direction == 1:
+            self._move([27, 32], time)
+        elif direction == -1:
+            self._move([27, 33], time)
+        else:
+            print("incorrect parameters for chair rotation")
+    def chrMv(self, direction, time):
+        if direction == 1:
+            self._move([14, 32], time)
+        elif direction == -1:
+            self._move([14, 33], time)
+        else:
+            print("incorrect parameters for chair rotation")
+
+    def up(self, direction, time):
+        if direction == 1:
+            self._move([23, 4], time)
+        elif direction == -1:
+            self._move([23, 32], time)
+        else:
+            print("incorrect parameters for up\down")
+
+    def headRest(self, direction, time):
+        if direction == 1:
+            self._move([21, 4], time)
+        elif direction == -1:
+            self._move([21, 32], time)
+        else:
+            print("incorrect parameters for up\down")
+
+class MRCDS_ESP32_BLE():
+
+    def __init__(self, name, pins):
+        self.name = name
+        self.pins = pins
+        self.timer1 = Timer(0)
+        # ble settings/init
+        self.ble = ubluetooth.BLE()
+        self.ble.active(True)
+        self.ble.irq(self.ble_irq)
+        self.register()
+        self.advertiser()
+        self.chr = MrcdChair(self.pins)
+
+    def advertiser(self):
+        name = bytes(self.name, 'UTF-8')
+        adv_data = bytearray('\x02\x01\x02') + bytearray((len(name) + 1, 0x09)) + name
+        self.ble.gap_advertise(100, adv_data)
+
+    def register(self):
+        # Nordic UART Service (NUS)
+        NUS_UUID = '6E400001-B5A3-F393-E0A9-E50E24DCCA9E'
+        RX_UUID = '6E400002-B5A3-F393-E0A9-E50E24DCCA9E'
+        TX_UUID = '6E400003-B5A3-F393-E0A9-E50E24DCCA9E'
+
+        BLE_NUS = ubluetooth.UUID(NUS_UUID)
+        BLE_RX = (ubluetooth.UUID(RX_UUID), ubluetooth.FLAG_WRITE)
+        BLE_TX = (ubluetooth.UUID(TX_UUID), ubluetooth.FLAG_NOTIFY)
+
+        BLE_UART = (BLE_NUS, (BLE_TX, BLE_RX,))
+        SERVICES = (BLE_UART,)
+        ((self.tx, self.rx,),) = self.ble.gatts_register_services(SERVICES)
+
+    def connected(self):
+        print('BLE connected', 0, 0)
+
+    def disconnected(self):
+        print('BLE Disconnected', 0, 0)
+
+    def send(self, data):
+        data += self.chr.printPinsState()
+        self.ble.gatts_notify(0, self.tx, data + '\n')
+
+    def receive(self):
+        self.receivedData = self.ble.gatts_
+
+    def ble_irq(self, event, data):
+        global ble_msg
+
+        if event == 1:  # _IRQ_CENTRAL_CONNECT:
+            # A central has connected to this peripheral
+            self.connected()
+
+        elif event == 2:  # _IRQ_CENTRAL_DISCONNECT:
+            # A central has disconnected from this peripheral.
+            self.advertiser()
+            self.disconnected()
+
+        elif event == 3:  # _IRQ_GATTS_WRITE:
+            # A client has written to this characteristic or descriptor.
+            buffer = self.ble.gatts_read(self.rx)
+            ble_msg = buffer.decode('UTF-8').strip()
+            print(ble_msg)
+
+            if ble_msg == 'back':
+                self.chr.fwd(1, 1500)
+                self.chr.stopAll()
+            elif ble_msg == 'fwd':
+                self.chr.fwd(-1, 1500)
+                self.chr.stopAll()
+            elif ble_msg == 'down':
+                self.chr.up(-1, 1500)
+                self.chr.stopAll()
+            elif ble_msg == 'up':
+                self.chr.up(1, 1500)
+                self.chr.stopAll()
+            elif ble_msg == 'inclH':
+                self.chr.incline(1, 1500)
+                self.chr.stopAll()
+            elif ble_msg == 'inclL':
+                self.chr.incline(-1, 1500)
+                self.chr.stopAll()
+            elif ble_msg == 'chrl':
+                self.chr.chrRot(-1, 1500)
+                self.chr.stopAll()
+            elif ble_msg == 'chrh':
+                self.chr.chrRot(1, 1500)
+                self.chr.stopAll()
+            elif ble_msg == 'hrstl':
+                self.chr.headRest(1, 1500)
+                self.chr.stopAll()
+            elif ble_msg == 'hrsth':
+                self.chr.headRest(-1, 1500)
+                self.chr.stopAll()
+            elif ble_msg == 'chrf':
+                self.chr.chrMv(1, 1500)
+                self.chr.stopAll()
+            elif ble_msg == 'chrb':
+                self.chr.chrMv(-1, 1500)
+                self.chr.stopAll()
+            elif ble_msg == '0':
+                self.chr.printPinsState()
+                self.chr.stopAll()
+                self.send("")
+            elif ble_msg.isdigit():
+                print(int(ble_msg))
+                print(ble_msg[0:17], 0, 0)
+                self.chr.switchOut(ble_msg)
+            else:
+                msg ="available commands: fwd,back,up,down,inclH,inclL,chrl,chrh,hrsth,hrstl,chrf,chrb"
+                print(msg)
+                self.send(msg)
+
+
+def start():
+    pinsStr = ["2", "4", "12", "13", "14", "15", "18", "19", "21", "22", "23", "27", "32", "33"]
+    pins = [2, 4, 12, 13, 14, 15, 18, 19, 21, 22, 23, 27, 32, 33]
+    logger = Logger()
+    pinout = PinOut(pins)
+    ble = MRCDS_ESP32_BLE("ESP32BLE",pins)
+
+
+if __name__ == "__main__":
+    start()
